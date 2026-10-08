@@ -2,7 +2,9 @@
 
 FAQPage must NOT block because it remains a valid Schema.org type, even though
 Google retired its rich results in May 2026 and no AI or ranking benefit is
-confirmed. Genuinely deprecated types must still block the edit (exit 2).
+confirmed. The same holds for the other types whose Google rich result was
+withdrawn (HowTo, ClaimReview, ...): Claude is warned, the edit is not blocked.
+Placeholder text left in the markup still blocks (exit 2).
 """
 
 from __future__ import annotations
@@ -57,8 +59,20 @@ def test_faqpage_not_blocked(tmp_path):
     assert _run(tmp_path, "FAQPage") == 0
 
 
-def test_deprecated_type_still_blocks(tmp_path):
-    assert _run(tmp_path, "ClaimReview") == 2
+def test_withdrawn_rich_result_types_warn_instead_of_blocking(tmp_path):
+    for schema_type in ("HowTo", "ClaimReview", "SpecialAnnouncement", "VehicleListing"):
+        assert _run(tmp_path, schema_type) == 1, schema_type
+
+
+def test_withdrawn_type_warning_names_the_type_and_keeps_the_markup(tmp_path: Path) -> None:
+    payload = {"@context": "https://schema.org", "@type": "HowTo", "name": "Cum rezervi"}
+    warnings = _warnings(_run_payload(tmp_path, payload, capture_output=True, encoding="utf-8"))
+    assert "HowTo" in warnings
+    assert "still valid Schema.org" in warnings
+
+
+def test_placeholder_still_blocks(tmp_path):
+    assert _run(tmp_path, "LocalBusiness", ',"name":"[Business Name]"') == 2
 
 
 def test_valid_top_level_graph_does_not_require_container_type(tmp_path: Path) -> None:
@@ -85,12 +99,14 @@ def test_graph_members_inherit_context_but_still_require_type(tmp_path: Path) ->
     assert "Missing @context" not in _warnings(result)
 
 
-def test_deprecated_graph_member_still_blocks(tmp_path: Path) -> None:
+def test_withdrawn_graph_member_warns(tmp_path: Path) -> None:
     payload = {
         "@context": "https://schema.org",
         "@graph": [{"@type": "ClaimReview", "name": "Old markup"}],
     }
-    assert _run_payload(tmp_path, payload).returncode == 2
+    result = _run_payload(tmp_path, payload, capture_output=True, encoding="utf-8")
+    assert result.returncode == 0
+    assert "ClaimReview" in _warnings(result)
 
 
 def test_non_object_graph_members_are_reported_without_crashing(tmp_path: Path) -> None:
@@ -129,8 +145,9 @@ def test_replace_placeholder_matches_tokens_not_normal_words(tmp_path: Path) -> 
 def test_hook_diagnostics_do_not_crash_under_cp1252(tmp_path: Path) -> None:
     payload = {
         "@context": "https://schema.org",
-        "@type": "ClaimReview",
-        "name": "Crème brûlée",
+        "@type": "Product",
+        "name": "REPLACE",
+        "description": "Crème brûlée",
     }
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "cp1252"

@@ -5,11 +5,21 @@ Validates JSON-LD schema after file edits. The file is already written when
 a PostToolUse hook runs, so nothing here can undo the edit; the hook makes
 sure Claude reads what is wrong:
 
-- critical errors (placeholders, deprecated or retired types): exit 2, with
-  the errors on stderr, which Claude Code feeds back to Claude;
+- critical errors (placeholder text left in the markup): exit 2, with the
+  errors on stderr, which Claude Code feeds back to Claude;
 - warnings only: exit 0, with the warnings as hookSpecificOutput
   additionalContext JSON on stdout, which Claude reads without an error
   notice (exit 1 would show them to the user only).
+
+Types whose Google rich result was withdrawn (HowTo, ClaimReview, ...) are
+warnings, not errors: they remain valid Schema.org vocabulary that Bing and
+other consumers can still read, the same reasoning this hook already applies
+to FAQPage. Claude is told about them, not told to remove them.
+
+Laravel Blade templates (``*.blade.php``) render JSON-LD at request time with
+``{!! json_encode($schema) !!}``, ``@json($schema)`` or ``{{ $value }}``
+inside a literal object. Such bodies are not literal JSON, so a parse failure
+in a Blade file that contains Blade syntax is skipped instead of reported.
 
 Hook configuration in ~/.claude/settings.json:
 {
@@ -104,6 +114,14 @@ COMPONENT_EXPRESSION_RE = re.compile(
 )
 COMPONENT_EXTENSIONS = (".jsx", ".tsx", ".vue", ".svelte")
 
+# Laravel Blade output and directives. Only consulted for ``*.blade.php`` files
+# and only after ``json.loads`` has failed, so literal JSON in a Blade file is
+# still validated in full. JSON-LD keys such as "@type" sit inside quotes, so a
+# directive counts only at the start of a line or after whitespace, a comma or
+# an opening bracket.
+BLADE_EXTENSION = ".blade.php"
+BLADE_SYNTAX_RE = re.compile(r"\{!!|\{\{|(?:^|[\s,\[{])@[A-Za-z_]\w*", re.MULTILINE)
+
 SCHEMA_ORG_CONTEXTS = frozenset(
     {"https://schema.org", "http://schema.org", "https://schema.org/", "http://schema.org/"}
 )
@@ -145,6 +163,16 @@ def _is_template_expression(block: str, filepath: str = "") -> bool:
     return False
 
 
+def _is_blade_render(block: str, filepath: str) -> bool:
+    """True when a Blade body failed to parse because Laravel renders it.
+
+    ``{!! json_encode($schema) !!}``, ``@json($schema)``, an unquoted
+    ``{{ $rating }}`` or an ``@if`` around a property are all invalid as static
+    text and valid once rendered.
+    """
+    return filepath.lower().endswith(BLADE_EXTENSION) and bool(BLADE_SYNTAX_RE.search(block))
+
+
 def _is_schema_org_context(value: Any) -> bool:
     """Accept the schema.org context in its string, list and object forms."""
     if isinstance(value, str):
@@ -171,6 +199,8 @@ def validate_jsonld(content: str, filepath: str = "") -> List[str]:
         try:
             data = json.loads(block)
         except json.JSONDecodeError as e:
+            if _is_blade_render(block, filepath):
+                continue  # Rendered by Blade at request time; not literal JSON
             errors.append(f"Block {i}: Invalid JSON; {e}")
             continue
 
@@ -217,19 +247,25 @@ def _validate_schema_object(
     for placeholder in BARE_PLACEHOLDER_RE.findall(text):
         errors.append(f"{prefix}: Contains placeholder text: {placeholder}")
 
-    # Check for deprecated types
+    # Types whose Google rich result was withdrawn. They stay valid Schema.org
+    # (like FAQPage below), so they are reported as a warning, never as an
+    # error that tells Claude to strip the markup.
     schema_type = obj.get("@type", "")
-    deprecated = {
-        "HowTo": "deprecated September 2023",
-        "SpecialAnnouncement": "deprecated July 31, 2025",
-        "CourseInfo": "retired June 2025",
-        "EstimatedSalary": "retired June 2025",
-        "LearningVideo": "retired June 2025",
-        "ClaimReview": "retired June 2025; fact-check rich results discontinued",
-        "VehicleListing": "retired June 2025; vehicle listing structured data discontinued",
+    rich_result_withdrawn = {
+        "HowTo": "Google HowTo rich results ended September 2023",
+        "SpecialAnnouncement": "Google SpecialAnnouncement support ended July 31, 2025",
+        "CourseInfo": "Google Course info rich results ended June 2025",
+        "EstimatedSalary": "Google Estimated salary rich results ended June 2025",
+        "LearningVideo": "Google Learning video rich results ended June 2025",
+        "ClaimReview": "Google fact-check rich results ended June 2025",
+        "VehicleListing": "Google vehicle listing rich results ended June 2025",
     }
-    if schema_type in deprecated:
-        errors.append(f"{prefix}: @type '{schema_type}' is {deprecated[schema_type]}")
+    if schema_type in rich_result_withdrawn:
+        errors.append(
+            f"{prefix}: @type '{schema_type}' no longer earns a Google rich result "
+            f"({rich_result_withdrawn[schema_type]}). It is still valid Schema.org; "
+            "keep it unless it was added only for that rich result."
+        )
 
     # Check for restricted types used incorrectly.
     # FAQPage is intentionally NOT flagged: Google retired FAQ rich results for
@@ -316,7 +352,7 @@ def main():
         sys.exit(0)
 
     # Categorize errors
-    critical_keywords = ["placeholder", "deprecated", "retired"]
+    critical_keywords = ["placeholder"]
     critical = [e for e in errors if any(kw in e.lower() for kw in critical_keywords)]
     warnings = [e for e in errors if e not in critical]
 

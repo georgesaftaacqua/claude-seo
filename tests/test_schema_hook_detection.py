@@ -21,7 +21,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks" / "validate-schema.py"
 
-RETIRED = '{"@context":"https://schema.org","@type":"ClaimReview"}'
+# A blocking fixture that also names a withdrawn type. A withdrawn type alone is
+# only a warning now; the REPLACE placeholder keeps the block critical, so these
+# detection tests still prove, through exit 2 and the type name on stderr, that
+# the block was found and parsed.
+BLOCKING = '{"@context":"https://schema.org","@type":"ClaimReview","name":"REPLACE"}'
 PLACEHOLDER = '{"@context":"https://schema.org","@type":"LocalBusiness","name":"[Business Name]"}'
 VALID = '{"@context":"https://schema.org","@type":"Organization","name":"Example"}'
 
@@ -65,24 +69,24 @@ def test_block_with_csp_nonce_is_validated(tmp_path: Path) -> None:
 
 def test_attribute_before_type_is_validated(tmp_path: Path) -> None:
     result = _run(
-        tmp_path, "page.html", f'<script id="schema" type="application/ld+json">{RETIRED}</script>'
+        tmp_path, "page.html", f'<script id="schema" type="application/ld+json">{BLOCKING}</script>'
     )
     assert result.returncode == 2
     assert "ClaimReview" in result.stderr
 
 
 def test_unquoted_type_value_is_validated(tmp_path: Path) -> None:
-    result = _run(tmp_path, "page.html", f"<script type=application/ld+json>{RETIRED}</script>")
+    result = _run(tmp_path, "page.html", f"<script type=application/ld+json>{BLOCKING}</script>")
     assert result.returncode == 2
 
 
 def test_uppercase_tag_and_attribute_are_validated(tmp_path: Path) -> None:
-    result = _run(tmp_path, "page.html", f'<SCRIPT TYPE="application/ld+json">{RETIRED}</SCRIPT>')
+    result = _run(tmp_path, "page.html", f'<SCRIPT TYPE="application/ld+json">{BLOCKING}</SCRIPT>')
     assert result.returncode == 2
 
 
 def test_other_script_types_are_ignored(tmp_path: Path) -> None:
-    head = f'<script type="module">{RETIRED}</script><script type="text/javascript">var x = {RETIRED};</script>'
+    head = f'<script type="module">{BLOCKING}</script><script type="text/javascript">var x = {BLOCKING};</script>'
     assert _clean(_run(tmp_path, "page.html", head))
 
 
@@ -126,7 +130,7 @@ def test_ejs_body_is_not_reported(tmp_path: Path) -> None:
 
 
 def test_literal_json_in_component_file_is_still_validated(tmp_path: Path) -> None:
-    result = _run(tmp_path, "Page.tsx", f'<script type="application/ld+json">{RETIRED}</script>')
+    result = _run(tmp_path, "Page.tsx", f'<script type="application/ld+json">{BLOCKING}</script>')
     assert result.returncode == 2
 
 
@@ -176,7 +180,7 @@ def test_foreign_context_is_still_reported(tmp_path: Path) -> None:
 def test_two_plain_ldjson_blocks_are_both_detected(tmp_path: Path) -> None:
     head = (
         f'<script type="application/ld+json">{VALID}</script>'
-        f'<script type="application/ld+json">{RETIRED}</script>'
+        f'<script type="application/ld+json">{BLOCKING}</script>'
     )
     result = _run(tmp_path, "page.html", head)
     assert result.returncode == 2
@@ -185,7 +189,7 @@ def test_two_plain_ldjson_blocks_are_both_detected(tmp_path: Path) -> None:
 
 
 def test_block_with_nonce_and_id_is_validated(tmp_path: Path) -> None:
-    head = f'<script id="ld-schema" type="application/ld+json" nonce="r4nd0m">{RETIRED}</script>'
+    head = f'<script id="ld-schema" type="application/ld+json" nonce="r4nd0m">{BLOCKING}</script>'
     result = _run(tmp_path, "page.html", head)
     assert result.returncode == 2
     assert "ClaimReview" in result.stderr
@@ -223,7 +227,7 @@ def test_top_level_graph_is_detected(tmp_path: Path) -> None:
         '<script type="application/ld+json">'
         '{"@context":"https://schema.org","@graph":['
         '{"@type":"Organization","name":"X"},'
-        f"{RETIRED}"
+        f"{BLOCKING}"
         "]}"
         "</script>"
     )
@@ -245,3 +249,51 @@ def test_blocking_message_goes_to_stderr_not_stdout(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "[Business Name]" in result.stderr
     assert result.stdout == ""
+
+
+# --- Laravel Blade ----------------------------------------------------------
+
+
+def test_blade_raw_echo_json_encode_is_not_reported(tmp_path: Path) -> None:
+    head = '<script type="application/ld+json">{!! json_encode($schema, JSON_UNESCAPED_SLASHES) !!}</script>'
+    assert _clean(_run(tmp_path, "hotel.blade.php", head))
+
+
+def test_blade_json_directive_is_not_reported(tmp_path: Path) -> None:
+    head = '<script type="application/ld+json">\n@json($breadcrumbs)\n</script>'
+    assert _clean(_run(tmp_path, "hotel.blade.php", head))
+
+
+def test_blade_unquoted_echo_inside_literal_object_is_not_reported(tmp_path: Path) -> None:
+    head = (
+        '<script type="application/ld+json">'
+        '{"@context":"https://schema.org","@type":"Hotel","name":"{{ $hotel->name }}",'
+        '"starRating":{"@type":"Rating","ratingValue":{{ $hotel->stars }}}}'
+        "</script>"
+    )
+    assert _clean(_run(tmp_path, "hotel.blade.php", head))
+
+
+def test_blade_if_directive_around_a_property_is_not_reported(tmp_path: Path) -> None:
+    head = (
+        '<script type="application/ld+json">{"@context":"https://schema.org","@type":"Hotel",\n'
+        '"name":"{{ $hotel->name }}"\n@if($hotel->phone)\n,"telephone":"{{ $hotel->phone }}"\n@endif\n}'
+        "</script>"
+    )
+    assert _clean(_run(tmp_path, "hotel.blade.php", head))
+
+
+def test_literal_json_in_blade_file_is_still_validated(tmp_path: Path) -> None:
+    result = _run(tmp_path, "hotel.blade.php", f'<script type="application/ld+json">{BLOCKING}</script>')
+    assert result.returncode == 2
+    assert "ClaimReview" in result.stderr
+
+
+def test_malformed_json_without_blade_syntax_in_blade_file_is_still_reported(tmp_path: Path) -> None:
+    head = '<script type="application/ld+json">{"@context":"https://schema.org","@type":"Hotel",}</script>'
+    assert "Invalid JSON" in _warnings(_run(tmp_path, "hotel.blade.php", head))
+
+
+def test_blade_syntax_outside_blade_files_is_still_reported(tmp_path: Path) -> None:
+    head = '<script type="application/ld+json">@json($schema)</script>'
+    assert "Invalid JSON" in _warnings(_run(tmp_path, "page.html", head))
